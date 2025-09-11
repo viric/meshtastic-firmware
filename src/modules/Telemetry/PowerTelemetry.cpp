@@ -27,6 +27,66 @@ namespace graphics
 extern void drawCommonHeader(OLEDDisplay *display, int16_t x, int16_t y, const char *titleStr, bool battery_only);
 }
 
+#ifdef ACS712_PIN
+extern esp_adc_cal_characteristics_t *adc_characs;
+
+static void initACS712()
+{
+    static bool initialized = false;
+    if (initialized)
+        return;
+    pinMode(ACS712_PIN, INPUT);
+    adc1_config_channel_atten(ACS712_CHAN, ADC_ATTENUATION);
+    adc1_config_channel_atten(ACS712_VCC_CHAN, ADC_ATTENUATION);
+    initialized = true;
+}
+
+static float readACS712Pin(adc1_channel_t chan)
+{
+    uint32_t raw = 0;
+    uint8_t nraw = 0;
+    for(int i=0; i < 10; ++i)
+    {
+	int val = adc1_get_raw(chan);
+	if (val >= 0)
+	{
+            LOG_INFO("ADC get raw val[%i] = %i", i, val);
+            raw += (uint32_t) val;
+            nraw++;
+	}
+    }
+    return esp_adc_cal_raw_to_voltage(raw / ((nraw>0)?nraw:1), adc_characs);
+}
+
+static float readACS712Vcc()
+{
+    float vpin = readACS712Pin(ACS712_VCC_CHAN);
+    LOG_INFO("ACS712 Raw vcc pin voltage: %f mV", vpin);
+    float vdivider = 18. / (18. + 47.);
+    float voltage_mV = vpin / vdivider /*voltage divider*/;
+    return voltage_mV;
+}
+
+static float readACS712Vout()
+{
+    float vpin = readACS712Pin(ACS712_CHAN);
+    LOG_INFO("ACS712 Raw vout pin voltage: %f mV", vpin);
+    float vdivider = 33. / (33. + 56);
+    float voltage_mV = vpin / vdivider /*voltage divider*/;
+    return voltage_mV;
+}
+
+static float readACS712Current()
+{
+    /* Sensitivity 100mV/A */
+    float vout = readACS712Vout();
+    float vcc = readACS712Vcc();
+    LOG_INFO("ACS712 vout = %f mV, vcc = %f mV", vout, vcc);
+    return (vout - vcc / 2) / 100. * 1000. /*mA/A*/; 
+}
+#endif
+
+
 int32_t PowerTelemetryModule::runOnce()
 {
     if (sleepOnNextExecution == true) {
@@ -74,6 +134,8 @@ int32_t PowerTelemetryModule::runOnce()
                 result = ina3221Sensor.isInitialized() ? 0 : ina3221Sensor.runOnce();
             if (max17048Sensor.hasSensor())
                 result = max17048Sensor.isInitialized() ? 0 : max17048Sensor.runOnce();
+            initACS712();
+            result = 0;
         }
 
         // it's possible to have this module enabled, only for displaying values on the screen.
@@ -205,6 +267,11 @@ bool PowerTelemetryModule::getPowerTelemetry(meshtastic_Telemetry *m)
         valid = ina3221Sensor.getMetrics(m);
     if (max17048Sensor.hasSensor())
         valid = max17048Sensor.getMetrics(m);
+#ifdef ACS712_PIN
+    m->variant.power_metrics.has_ch1_current = true;
+    m->variant.power_metrics.ch1_current = readACS712Current();
+    valid = true;
+#endif
 #endif
 
     return valid;
